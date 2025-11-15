@@ -152,7 +152,7 @@ DigiWorksCPUAlarm
 
 Triggers when EC2 CPU usage is above 70%.
 
-Summary
+## Summary
 
 This stack deploys a fully automated AWS infrastructure, including:
 
