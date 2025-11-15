@@ -1,4 +1,4 @@
-DigiWorks Studio – Unified AWS Infrastructure Stack
+## DigiWorks Studio – Unified AWS Infrastructure Stack
 
 This CloudFormation template builds a complete, production-ready AWS environment for DigiWorks Studio.
 It includes networking, compute, database, storage, backup, and monitoring layers — all automated through a single stack.
