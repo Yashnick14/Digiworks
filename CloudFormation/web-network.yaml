@@ -1,0 +1,599 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  DigiWorks Studio Unified Cloud Stack
+  Provisions a scalable and secure AWS environment with VPC, subnets, NAT Gateway,
+  Elastic Beanstalk (with Load Balancer and Auto Scaling), Amazon RDS for MySQL,
+  S3 storage with lifecycle management, AWS Backup, Managed Active Directory,
+  and Site-to-Site VPN connectivity. Designed for cost-efficient automation,
+  reliability, and scalability aligned with the AWS Well-Architected Framework.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: digiworks
+    Description: Prefix for resource names
+
+  VpcCidr:
+    Type: String
+    Default: 10.30.0.0/16
+
+  PublicSubnet1Cidr:
+    Type: String
+    Default: 10.30.1.0/24
+
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: 10.30.2.0/24
+
+Resources:
+  # ------------------- VPC -------------------
+  DigiWorksVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpc"
+
+  # ------------------- Internet Gateway -------------------
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-igw"
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref DigiWorksVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ------------------- Public Subnet -------------------
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DigiWorksVPC
+      CidrBlock: !Ref PublicSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-subnet"
+
+  # ------------------- Private Subnet -------------------
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DigiWorksVPC
+      CidrBlock: !Ref PrivateSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-subnet"
+
+  # ------------------- Private Subnet 2 -------------------
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DigiWorksVPC
+      CidrBlock: 10.30.3.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-subnet-2"
+
+  # ------------------- Elastic IP for NAT -------------------
+  NatEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-nat-eip"
+
+  # ------------------- NAT Gateway -------------------
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-nat-gateway"
+
+  # ------------------- Route Tables -------------------
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DigiWorksVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-rt"
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DigiWorksVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-rt"
+
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ------------------- Security Groups -------------------
+  WebServerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP/HTTPS for Web Server
+      VpcId: !Ref DigiWorksVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-web-sg"
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow MySQL access from Web SG
+      VpcId: !Ref DigiWorksVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref WebServerSG
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-rds-sg"
+
+  BastionSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH from admin IP
+      VpcId: !Ref DigiWorksVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-bastion-sg"
+
+  # ------------------- Elastic Beanstalk IAM Role & Instance Profile -------------------
+  WebServerInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-eb-ec2-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkMulticontainerDocker
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWorkerTier
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+
+  WebServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref WebServerInstanceRole
+      InstanceProfileName: !Sub "${ProjectName}-eb-instance-profile"
+
+  # ------------------- Elastic Beanstalk Application -------------------
+  DigiWorksApp:
+    Type: AWS::ElasticBeanstalk::Application
+    Properties:
+      ApplicationName: !Sub "${ProjectName}-web-app"
+      Description: DigiWorks Studio Website and CMS hosted on Elastic Beanstalk.
+
+  # ------------------- Elastic Beanstalk Environment -------------------
+  DigiWorksEnvironment:
+    Type: AWS::ElasticBeanstalk::Environment
+    Properties:
+      EnvironmentName: !Sub "${ProjectName}-web-env"
+      ApplicationName: !Ref DigiWorksApp
+      PlatformArn: arn:aws:elasticbeanstalk:us-east-1::platform/Node.js 22 running on 64bit Amazon Linux 2023/6.6.5
+      OptionSettings:
+        # ------------------- EC2 Instance Configuration -------------------
+        - Namespace: aws:autoscaling:launchconfiguration
+          OptionName: InstanceType
+          Value: t3.micro
+        - Namespace: aws:autoscaling:launchconfiguration
+          OptionName: IamInstanceProfile
+          Value: !Ref WebServerInstanceProfile
+        - Namespace: aws:autoscaling:launchconfiguration
+          OptionName: SecurityGroups
+          Value: !Ref WebServerSG
+
+        # ------------------- VPC Integration -------------------
+        - Namespace: aws:ec2:vpc
+          OptionName: VPCId
+          Value: !Ref DigiWorksVPC
+        # EC2 instances (app servers) go to PRIVATE subnets
+        - Namespace: aws:ec2:vpc
+          OptionName: Subnets
+          Value: !Join [",", [!Ref PrivateSubnet1, !Ref PrivateSubnet2]]
+
+        # ALB (load balancer) stays in PUBLIC subnets
+        - Namespace: aws:ec2:vpc
+          OptionName: ELBSubnets
+          Value: !Join [",", [!Ref PublicSubnet1]]
+
+        # ------------------- Environment Type (Enable ALB) -------------------
+        - Namespace: aws:elasticbeanstalk:environment
+          OptionName: EnvironmentType
+          Value: LoadBalanced
+
+        # ------------------- ALB Configuration (Modern) -------------------
+        - Namespace: aws:elbv2:loadbalancer
+          OptionName: IdleTimeout
+          Value: 60
+        - Namespace: aws:elbv2:listener:default
+          OptionName: ListenerEnabled
+          Value: true
+        - Namespace: aws:elbv2:listener:default
+          OptionName: Protocol
+          Value: HTTP
+        - Namespace: aws:elbv2:listener:default
+          OptionName: Port
+          Value: 80
+
+        # ------------------- Auto Scaling Configuration -------------------
+        - Namespace: aws:autoscaling:asg
+          OptionName: MinSize
+          Value: 2
+        - Namespace: aws:autoscaling:asg
+          OptionName: MaxSize
+          Value: 2
+        - Namespace: aws:autoscaling:trigger
+          OptionName: MeasureName
+          Value: CPUUtilization
+        - Namespace: aws:autoscaling:trigger
+          OptionName: UpperThreshold
+          Value: 70
+        - Namespace: aws:autoscaling:trigger
+          OptionName: LowerThreshold
+          Value: 30
+        - Namespace: aws:autoscaling:trigger
+          OptionName: Period
+          Value: 5
+
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: web
+
+  # ------------------- RDS Subnet Group -------------------
+  RDSSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: "Private subnet group for DigiWorks RDS"
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2 # Added second subnet for AZ coverage
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-rds-subnet-group"
+
+  # ------------------- Amazon RDS (MySQL) -------------------
+  DigiWorksRDS:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub "${ProjectName}-rds"
+      AllocatedStorage: 20
+      DBInstanceClass: db.t3.micro
+      Engine: mysql
+      EngineVersion: "8.0.39"
+      MasterUsername: admin
+      MasterUserPassword: AdminRDS123!
+      DBSubnetGroupName: !Ref RDSSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: 1
+      StorageEncrypted: false
+      DeletionProtection: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-rds"
+
+  # ------------------- Amazon S3 (Creative Assets + Lifecycle Archive) -------------------
+  DigiWorksS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-assets-${AWS::AccountId}"
+      AccessControl: Private
+      VersioningConfiguration:
+        Status: Suspended
+      LifecycleConfiguration:
+        Rules:
+          - Id: MoveToGlacier
+            Status: Enabled
+            Transitions:
+              - StorageClass: GLACIER
+                TransitionInDays: 30
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-assets"
+
+  # ------------------- AWS Backup Vault -------------------
+  DigiWorksBackupVault:
+    Type: AWS::Backup::BackupVault
+    Properties:
+      BackupVaultName: !Sub "${ProjectName}-backup-vault"
+      EncryptionKeyArn: !Ref "AWS::NoValue"
+
+  # ------------------- AWS Backup Plan (Fixed Schema) -------------------
+  DigiWorksBackupPlan:
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Sub "${ProjectName}-daily-backup"
+        BackupPlanRule:
+          - RuleName: DailyBackupRule
+            TargetBackupVault: !Ref DigiWorksBackupVault
+            ScheduleExpression: cron(0 3 * * ? *)
+            Lifecycle:
+              DeleteAfterDays: 30
+
+  # ------------------- AWS Backup IAM Role -------------------
+  BackupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-backup-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: backup.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-backup-role"
+
+  # ------------------- AWS Backup Selection (RDS only) -------------------
+  DigiWorksBackupSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref DigiWorksBackupPlan
+      BackupSelection:
+        SelectionName: !Sub "${ProjectName}-backup-selection"
+        IamRoleArn: !GetAtt BackupRole.Arn
+        Resources:
+          - !GetAtt DigiWorksRDS.DBInstanceArn # Only backs up RDS (S3 handled by lifecycle)
+
+  # ------------------- CloudWatch Alarm (Free Tier) -------------------
+  DigiWorksCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Alert if EC2/Beanstalk CPU >70%"
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 70
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Sub "awseb-${ProjectName}-web-env"
+      Unit: Percent
+      AlarmActions:
+        - !Ref DigiWorksSNSTopic # Sends alert via SNS
+      OKActions:
+        - !Ref DigiWorksSNSTopic # Notify when back to normal
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-cpu-alarm"
+
+  # ------------------- AWS Managed Microsoft AD -------------------
+  DigiWorksDirectory:
+    Type: AWS::DirectoryService::MicrosoftAD
+    Properties:
+      Name: corp.digiworks.local
+      Password: "DigiWorks$14"
+      Edition: Standard
+      VpcSettings:
+        VpcId: !Ref DigiWorksVPC
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+
+  # ------------------- AWS Site-to-Site VPN (Hybrid Connectivity) -------------------
+  CustomerGateway:
+    Type: AWS::EC2::CustomerGateway
+    Properties:
+      BgpAsn: 65000
+      IpAddress: 203.0.113.12
+      Type: ipsec.1
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-cgw"
+
+  VPNGateway:
+    Type: AWS::EC2::VPNGateway
+    Properties:
+      Type: ipsec.1
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vgw"
+
+  VPNAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref DigiWorksVPC
+      VpnGatewayId: !Ref VPNGateway
+
+  VPNConnection:
+    Type: AWS::EC2::VPNConnection
+    Properties:
+      Type: ipsec.1
+      CustomerGatewayId: !Ref CustomerGateway
+      VpnGatewayId: !Ref VPNGateway
+      StaticRoutesOnly: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpn-connection"
+
+  # ------------------- Route for VPN and Managed AD Connectivity -------------------
+  VPNToADRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPNConnection
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 192.168.0.0/16 # <-- Replace with the actual on-prem network range
+      GatewayId: !Ref VPNGateway
+      # This creates a two-way path for directory authentication between
+      # on-prem PCs and the AWS Managed Microsoft AD.
+
+  # ------------------- SNS Topic for Alerts -------------------
+  DigiWorksSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ProjectName}-alerts-topic"
+      DisplayName: "DigiWorks Alert Notifications"
+
+  # ------------------- SNS Email Subscription -------------------
+  DigiWorksSNSEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref DigiWorksSNSTopic
+      Protocol: email
+      Endpoint: "yashnick514@gmail.com"
+
+  # ------------------- AWS Cost Anomaly Detection -------------------
+  # DigiWorksCostAnomalyDetection:
+  #   Type: "AWS::CloudFormation::CustomResource"
+  #   Properties:
+  #     ServiceToken: "arn:aws:cloudformation:dummy"
+  #     Description: "Represents AWS Cost Anomaly Detection integrated with SNS for alerts > $3"
+  #     SNSAlertTopic: !Ref DigiWorksSNSTopic
+
+# ------------------- Outputs -------------------
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref DigiWorksVPC
+
+  PublicSubnetId:
+    Description: Public Subnet ID
+    Value: !Ref PublicSubnet1
+
+  PrivateSubnetId:
+    Description: Private Subnet ID
+    Value: !Ref PrivateSubnet1
+
+  WebServerSG:
+    Description: Web Security Group
+    Value: !Ref WebServerSG
+
+  RDSSecurityGroup:
+    Description: RDS Security Group
+    Value: !Ref RDSSecurityGroup
+
+  BastionSecurityGroup:
+    Description: Bastion Host SG
+    Value: !Ref BastionSG
+
+  ElasticBeanstalkApp:
+    Description: Elastic Beanstalk Application
+    Value: !Ref DigiWorksApp
+
+  ElasticBeanstalkEnv:
+    Description: Elastic Beanstalk Environment
+    Value: !Ref DigiWorksEnvironment
+
+  RDSInstanceEndpoint:
+    Description: Endpoint of the DigiWorks RDS MySQL instance
+    Value: !GetAtt DigiWorksRDS.Endpoint.Address
+
+  S3BucketName:
+    Description: S3 bucket for creative assets (with Glacier lifecycle)
+    Value: !Ref DigiWorksS3Bucket
+
+  BackupVaultName:
+    Description: Backup vault for automated daily RDS backups
+    Value: !Ref DigiWorksBackupVault
+
+  CPUAlarmName:
+    Description: CloudWatch alarm name
+    Value: !Ref DigiWorksCPUAlarm
+
+  ManagedADId:
+    Description: ID of the AWS Managed Microsoft AD Directory
+    Value: !Ref DigiWorksDirectory
+
+  VPNGatewayId:
+    Description: ID of the VPN Gateway
+    Value: !Ref VPNGateway
+
+  CustomerGatewayId:
+    Description: ID of the Customer Gateway (on-prem side)
+    Value: !Ref CustomerGateway
+
+  VPNConnectionId:
+    Description: ID of the Site-to-Site VPN Connection
+    Value: !Ref VPNConnection
+
+  SNSTopicArn:
+    Description: SNS Topic ARN for all alerts (CPU + Cost)
+    Value: !Ref DigiWorksSNSTopic
